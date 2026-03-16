@@ -1,0 +1,22 @@
+# ===== 文字コード =====
+AddDefaultCharset UTF-8
+
+# ===== config.php への直接アクセスを拒否 =====
+<Files "config.php">
+  Require all denied
+</Files>
+
+# ===== batch.php へのWebアクセスを拒否（CLI専用）=====
+<Files "batch.php">
+  Require all denied
+</Files>
+
+# ===== ディレクトリ一覧の非表示 =====
+Options -Indexes
+
+# ===== X-Content-Type-Options =====
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set X-XSS-Protection "1; mode=block"
+</IfModule>

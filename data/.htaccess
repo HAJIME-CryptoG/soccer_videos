@@ -1,0 +1,2 @@
+# data/ ディレクトリへのブラウザからの直接アクセスを全て拒否
+Require all denied
