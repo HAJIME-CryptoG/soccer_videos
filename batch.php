@@ -385,7 +385,7 @@ function parseVideoIdsFromCsv(array $lines): array
 {
     $header = str_getcsv($lines[0]);
     // YouTube Studio CSVの列名候補
-    $candidates = ['動画のURL', 'Video URL', 'ビデオID', 'Video ID', 'URL'];
+    $candidates = ['コンテンツ', '動画のURL', 'Video URL', 'ビデオID', 'Video ID', 'URL'];
     $colIndex   = -1;
     foreach ($candidates as $name) {
         $idx = array_search($name, $header);
