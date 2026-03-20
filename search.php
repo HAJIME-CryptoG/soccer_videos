@@ -6,12 +6,12 @@
  */
 
 // 同一オリジンのリクエストのみ許可（CORS）
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-$host   = $_SERVER['HTTP_HOST'] ?? '';
+$origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
+$host   = isset($_SERVER['HTTP_HOST'])   ? $_SERVER['HTTP_HOST']   : '';
 if ($origin !== '' && parse_url($origin, PHP_URL_HOST) !== $host) {
     http_response_code(403);
     header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode(['error' => 'Forbidden'], JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('error' => 'Forbidden'));
     exit;
 }
 
@@ -24,9 +24,9 @@ require_once __DIR__ . '/config.php';
 // -------------------------
 // パラメータの取得とサニタイズ
 // -------------------------
-$keyword  = trim($_GET['q']        ?? '');
-$dateFrom = trim($_GET['date_from'] ?? '');
-$dateTo   = trim($_GET['date_to']   ?? '');
+$keyword  = trim(isset($_GET['q'])         ? $_GET['q']         : '');
+$dateFrom = trim(isset($_GET['date_from']) ? $_GET['date_from'] : '');
+$dateTo   = trim(isset($_GET['date_to'])   ? $_GET['date_to']   : '');
 
 // 日付フォーマット検証（YYYY-MM-DD）
 $datePattern = '/^\d{4}-\d{2}-\d{2}$/';
@@ -41,21 +41,21 @@ if ($dateTo !== '' && !preg_match($datePattern, $dateTo)) {
 // データファイルの読み込み
 // -------------------------
 if (!file_exists(DATA_FILE)) {
-    echo json_encode(['results' => [], 'count' => 0], JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('results' => array(), 'count' => 0));
     exit;
 }
 
 $json = file_get_contents(DATA_FILE);
 if ($json === false) {
     http_response_code(500);
-    echo json_encode(['error' => 'データの読み込みに失敗しました。'], JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('error' => 'データの読み込みに失敗しました。'));
     exit;
 }
 
 $videos = json_decode($json, true);
 if (!is_array($videos)) {
     http_response_code(500);
-    echo json_encode(['error' => 'データの解析に失敗しました。'], JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('error' => 'データの解析に失敗しました。'));
     exit;
 }
 
@@ -64,12 +64,12 @@ if (!is_array($videos)) {
 // -------------------------
 
 // キーワードをスペース（全角・半角）で分割
-$keywords = [];
+$keywords = array();
 if ($keyword !== '') {
     $keywords = preg_split('/[\s　]+/u', mb_strtolower($keyword, 'UTF-8'), -1, PREG_SPLIT_NO_EMPTY);
 }
 
-$results = [];
+$results = array();
 foreach ($videos as $video) {
     // 必須フィールドチェック
     if (!isset($video['id'], $video['title'], $video['published_at'])) {
@@ -95,19 +95,16 @@ foreach ($videos as $video) {
         continue;
     }
 
-    $results[] = [
+    $results[] = array(
         'id'           => $video['id'],
         'title'        => $video['title'],
         'published_at' => $video['published_at'],
         'thumbnail'    => $video['thumbnail'],
         'url'          => $video['url'],
-    ];
+    );
 }
 
 // -------------------------
 // レスポンス出力
 // -------------------------
-echo json_encode(
-    ['results' => $results, 'count' => count($results)],
-    JSON_UNESCAPED_UNICODE
-);
+echo json_encode(array('results' => $results, 'count' => count($results)));

@@ -289,6 +289,9 @@
   var videoGrid    = document.getElementById('videoGrid');
   var statusMsg    = document.getElementById('statusMsg');
 
+  // 進行中のリクエストをキャンセルするための AbortController
+  var currentController = null;
+
   // ===== 初期表示：全件取得 =====
   fetchVideos('', '', '');
 
@@ -311,6 +314,12 @@
 
   // ===== API呼び出し =====
   function fetchVideos(q, dateFrom, dateTo) {
+    // 前のリクエストをキャンセル
+    if (currentController) {
+      currentController.abort();
+      currentController = null;
+    }
+
     showLoading();
 
     var params = new URLSearchParams();
@@ -320,15 +329,28 @@
 
     var url = 'search.php' + (params.toString() ? '?' + params.toString() : '');
 
-    fetch(url)
+    // AbortController が使える場合はキャンセル制御を付ける
+    var signal = null;
+    if (typeof AbortController !== 'undefined') {
+      currentController = new AbortController();
+      signal = currentController.signal;
+    }
+
+    var fetchOptions = signal ? { signal: signal } : {};
+
+    fetch(url, fetchOptions)
       .then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       })
       .then(function (data) {
+        currentController = null;
         renderResults(data.results || [], data.count || 0);
       })
       .catch(function (err) {
+        // キャンセルによるエラーは無視する
+        if (err.name === 'AbortError') return;
+        currentController = null;
         showError('データの取得に失敗しました。しばらくしてから再試行してください。');
         console.error(err);
       });
