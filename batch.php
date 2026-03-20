@@ -35,11 +35,11 @@ echo '[batch.php] モード: ' . ($fullMode ? '全件取得' : '差分更新') .
 // ステップ①: アップロード済みプレイリストID を取得
 // -------------------------
 $uploadPlaylistId = getUploadPlaylistId(YOUTUBE_API_KEY, YOUTUBE_CHANNEL_ID);
-if (!$uploadPlaylistId) {
-    echo '[ERROR] アップロード済みプレイリストIDの取得に失敗しました。' . PHP_EOL;
-    exit(1);
+if ($uploadPlaylistId) {
+    echo '[batch.php] プレイリストID: ' . $uploadPlaylistId . PHP_EOL;
+} else {
+    echo '[batch.php] プレイリストIDの取得に失敗。search.list APIを使用します。' . PHP_EOL;
 }
-echo '[batch.php] プレイリストID: ' . $uploadPlaylistId . PHP_EOL;
 
 // -------------------------
 // 既存データの読み込み
@@ -59,16 +59,24 @@ if (!$fullMode && file_exists(DATA_FILE)) {
 }
 
 // -------------------------
-// ステップ②: プレイリストから動画を取得
+// ステップ②: 動画を取得（playlistItems → search.list フォールバック）
 // -------------------------
 $newVideos  = [];
 $pageToken  = null;
 $pageCount  = 0;
+$useSearch  = false;
 
 do {
     $pageCount++;
-    $url = buildPlaylistItemsUrl(YOUTUBE_API_KEY, $uploadPlaylistId, $pageToken);
-    echo '[batch.php] API呼び出し #' . $pageCount . PHP_EOL;
+
+    if (!$useSearch && $uploadPlaylistId) {
+        $url = buildPlaylistItemsUrl(YOUTUBE_API_KEY, $uploadPlaylistId, $pageToken);
+    } else {
+        $url = buildSearchUrl(YOUTUBE_API_KEY, YOUTUBE_CHANNEL_ID, $pageToken);
+        $useSearch = true;
+    }
+
+    echo '[batch.php] API呼び出し #' . $pageCount . ($useSearch ? ' (search.list)' : ' (playlistItems)') . PHP_EOL;
 
     $response = fetchUrl($url);
     if ($response === false) {
@@ -78,16 +86,32 @@ do {
 
     $data = json_decode($response, true);
     if (isset($data['error'])) {
+        $errCode = $data['error']['code'] ?? 0;
+        // playlistItems が 404 の場合は search.list にフォールバック
+        if (!$useSearch && $errCode === 404) {
+            echo '[batch.php] playlistItems 404エラー。search.list APIにフォールバックします。' . PHP_EOL;
+            $useSearch = true;
+            $pageToken = null;
+            $pageCount--;
+            continue;
+        }
         echo '[ERROR] YouTube API エラー: ' . json_encode($data['error'], JSON_UNESCAPED_UNICODE) . PHP_EOL;
         exit(1);
     }
 
     $items = $data['items'] ?? [];
     foreach ($items as $item) {
-        $snippet   = $item['snippet'] ?? [];
-        $videoId   = $snippet['resourceId']['videoId'] ?? null;
-        $title     = $snippet['title'] ?? '';
-        $published = $snippet['publishedAt'] ?? '';
+        if ($useSearch) {
+            $videoId   = $item['id']['videoId'] ?? null;
+            $snippet   = $item['snippet'] ?? [];
+            $title     = $snippet['title'] ?? '';
+            $published = $snippet['publishedAt'] ?? '';
+        } else {
+            $snippet   = $item['snippet'] ?? [];
+            $videoId   = $snippet['resourceId']['videoId'] ?? null;
+            $title     = $snippet['title'] ?? '';
+            $published = $snippet['publishedAt'] ?? '';
+        }
 
         // 削除済み動画などIDがないものはスキップ
         if (!$videoId || $title === 'Deleted video' || $title === 'Private video') {
@@ -168,6 +192,26 @@ function getUploadPlaylistId(string $apiKey, string $channelId): ?string
 }
 
 /**
+ * search.list API の URL を組み立てる（playlistItems が使えない場合のフォールバック）。
+ */
+function buildSearchUrl(string $apiKey, string $channelId, ?string $pageToken): string
+{
+    $url = API_BASE . '/search'
+        . '?part=snippet'
+        . '&channelId=' . urlencode($channelId)
+        . '&type=video'
+        . '&order=date'
+        . '&maxResults=' . MAX_RESULTS
+        . '&key=' . urlencode($apiKey);
+
+    if ($pageToken !== null) {
+        $url .= '&pageToken=' . urlencode($pageToken);
+    }
+
+    return $url;
+}
+
+/**
  * playlistItems.list API の URL を組み立てる。
  */
 function buildPlaylistItemsUrl(string $apiKey, string $playlistId, ?string $pageToken): string
@@ -207,8 +251,8 @@ function fetchUrl(string $url): string|false
         return false;
     }
     if ($httpCode !== 200) {
-        echo '[ERROR] HTTP ' . $httpCode . ': ' . $response . PHP_EOL;
-        return false;
+        // エラーレスポンスのJSONを呼び出し元で解析できるよう返す
+        return $response;
     }
 
     return $response;
