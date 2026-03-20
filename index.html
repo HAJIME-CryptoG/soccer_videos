@@ -289,7 +289,8 @@
   var videoGrid    = document.getElementById('videoGrid');
   var statusMsg    = document.getElementById('statusMsg');
 
-  // 進行中のリクエストをキャンセルするための AbortController
+  // リクエストの世代管理（古いレスポンスを破棄するため）
+  var fetchSeq        = 0;
   var currentController = null;
 
   // ===== 初期表示：全件取得 =====
@@ -314,11 +315,14 @@
 
   // ===== API呼び出し =====
   function fetchVideos(q, dateFrom, dateTo) {
-    // 前のリクエストをキャンセル
+    // 前のリクエストをAbortで早期キャンセル（帯域節約）
     if (currentController) {
       currentController.abort();
       currentController = null;
     }
+
+    // このリクエストの世代番号を確定（古いレスポンスを無視するキー）
+    var seq = ++fetchSeq;
 
     showLoading();
 
@@ -329,14 +333,11 @@
 
     var url = 'search.php' + (params.toString() ? '?' + params.toString() : '');
 
-    // AbortController が使える場合はキャンセル制御を付ける
-    var signal = null;
     if (typeof AbortController !== 'undefined') {
       currentController = new AbortController();
-      signal = currentController.signal;
     }
 
-    var fetchOptions = signal ? { signal: signal } : {};
+    var fetchOptions = currentController ? { signal: currentController.signal } : {};
 
     fetch(url, fetchOptions)
       .then(function (res) {
@@ -344,11 +345,13 @@
         return res.json();
       })
       .then(function (data) {
+        // 自分より新しいリクエストがすでに来ていたら破棄
+        if (seq !== fetchSeq) return;
         currentController = null;
         renderResults(data.results || [], data.count || 0);
       })
       .catch(function (err) {
-        // キャンセルによるエラーは無視する
+        if (seq !== fetchSeq) return;
         if (err.name === 'AbortError') return;
         currentController = null;
         showError('データの取得に失敗しました。しばらくしてから再試行してください。');
