@@ -26,9 +26,24 @@ define('MAX_RESULTS', 50);
 // -------------------------
 // 引数の解析
 // -------------------------
-$fullMode = in_array('--full', $argv ?? [], true);
+$fullMode   = in_array('--full', $argv ?? [], true);
+$importFile = null;
+foreach ($argv ?? [] as $i => $arg) {
+    if ($arg === '--import' && isset($argv[$i + 1])) {
+        $importFile = $argv[$i + 1];
+        break;
+    }
+}
 
 echo '[batch.php] 開始: ' . date('Y-m-d H:i:s') . PHP_EOL;
+
+// --import モード
+if ($importFile !== null) {
+    echo '[batch.php] モード: インポート（' . $importFile . '）' . PHP_EOL;
+    runImportMode($importFile);
+    exit(0);
+}
+
 echo '[batch.php] モード: ' . ($fullMode ? '全件取得' : '差分更新') . PHP_EOL;
 
 // -------------------------
@@ -227,6 +242,224 @@ function buildPlaylistItemsUrl(string $apiKey, string $playlistId, ?string $page
     }
 
     return $url;
+}
+
+/**
+ * --import モード: ファイルからビデオIDを読み込み、videos.list で情報取得して保存。
+ *
+ * 対応フォーマット:
+ *   - テキスト（1行1ビデオID）
+ *   - YouTube Studio エクスポートCSV（"動画のURL"列または"Video ID"列を自動検出）
+ */
+function runImportMode(string $filePath): void
+{
+    if (!file_exists($filePath)) {
+        echo '[ERROR] ファイルが見つかりません: ' . $filePath . PHP_EOL;
+        exit(1);
+    }
+
+    $content = file_get_contents($filePath);
+    if ($content === false) {
+        echo '[ERROR] ファイルの読み込みに失敗しました。' . PHP_EOL;
+        exit(1);
+    }
+
+    $videoIds = parseVideoIds($content);
+    if (empty($videoIds)) {
+        echo '[ERROR] ビデオIDが見つかりませんでした。' . PHP_EOL;
+        exit(1);
+    }
+    echo '[batch.php] 読み込んだビデオID数: ' . count($videoIds) . PHP_EOL;
+
+    // 既存データを読み込み
+    $existingVideos = [];
+    $existingIds    = [];
+    if (file_exists(DATA_FILE)) {
+        $json = file_get_contents(DATA_FILE);
+        if ($json !== false) {
+            $existingVideos = json_decode($json, true) ?: [];
+            foreach ($existingVideos as $v) {
+                $existingIds[$v['id']] = true;
+            }
+            echo '[batch.php] 既存動画数: ' . count($existingVideos) . PHP_EOL;
+        }
+    }
+
+    // 新規IDのみ取得
+    $newIds = array_values(array_filter($videoIds, fn($id) => !isset($existingIds[$id])));
+    echo '[batch.php] 新規ビデオID数: ' . count($newIds) . PHP_EOL;
+
+    if (empty($newIds)) {
+        echo '[batch.php] 追加する新規動画はありません。' . PHP_EOL;
+        saveVideos($existingVideos);
+        return;
+    }
+
+    // videos.list API で50件ずつ取得
+    $newVideos = [];
+    foreach (array_chunk($newIds, 50) as $chunk) {
+        $ids = implode(',', array_map('urlencode', $chunk));
+        $url = API_BASE . '/videos'
+            . '?part=snippet'
+            . '&id=' . $ids
+            . '&key=' . urlencode(YOUTUBE_API_KEY);
+
+        echo '[batch.php] videos.list API呼び出し（' . count($chunk) . '件）' . PHP_EOL;
+
+        $response = fetchUrl($url);
+        if ($response === false) {
+            echo '[ERROR] API呼び出しに失敗しました。' . PHP_EOL;
+            exit(1);
+        }
+
+        $data = json_decode($response, true);
+        if (isset($data['error'])) {
+            echo '[ERROR] YouTube API エラー: ' . json_encode($data['error'], JSON_UNESCAPED_UNICODE) . PHP_EOL;
+            exit(1);
+        }
+
+        foreach ($data['items'] ?? [] as $item) {
+            $videoId  = $item['id'] ?? null;
+            $snippet  = $item['snippet'] ?? [];
+            $title    = $snippet['title'] ?? '';
+            $published = $snippet['publishedAt'] ?? '';
+
+            if (!$videoId || $title === 'Deleted video' || $title === 'Private video') {
+                continue;
+            }
+
+            $newVideos[] = [
+                'id'           => $videoId,
+                'title'        => $title,
+                'published_at' => substr($published, 0, 10),
+                'thumbnail'    => 'https://i.ytimg.com/vi/' . $videoId . '/mqdefault.jpg',
+                'url'          => 'https://www.youtube.com/watch?v=' . $videoId,
+            ];
+        }
+    }
+
+    echo '[batch.php] 新規取得動画数: ' . count($newVideos) . PHP_EOL;
+
+    // 日付降順でソート（新しい順）
+    usort($newVideos, fn($a, $b) => strcmp($b['published_at'], $a['published_at']));
+
+    $allVideos = array_merge($newVideos, $existingVideos);
+    saveVideos($allVideos);
+}
+
+/**
+ * テキストまたはCSVからビデオIDを抽出する。
+ */
+function parseVideoIds(string $content): array
+{
+    $lines = preg_split('/\r\n|\r|\n/', trim($content));
+    if (empty($lines)) {
+        return [];
+    }
+
+    // CSVかどうか判定（1行目にカンマが含まれる場合）
+    $firstLine = $lines[0];
+    if (str_contains($firstLine, ',')) {
+        return parseVideoIdsFromCsv($lines);
+    }
+
+    // テキスト形式: 各行がビデオIDまたはYouTube URL
+    $ids = [];
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+        $id = extractVideoId($line);
+        if ($id) {
+            $ids[] = $id;
+        }
+    }
+    return array_values(array_unique($ids));
+}
+
+/**
+ * YouTube Studio CSVからビデオIDを抽出する。
+ */
+function parseVideoIdsFromCsv(array $lines): array
+{
+    $header = str_getcsv($lines[0]);
+    // YouTube Studio CSVの列名候補
+    $candidates = ['動画のURL', 'Video URL', 'ビデオID', 'Video ID', 'URL'];
+    $colIndex   = -1;
+    foreach ($candidates as $name) {
+        $idx = array_search($name, $header);
+        if ($idx !== false) {
+            $colIndex = $idx;
+            break;
+        }
+    }
+
+    if ($colIndex === -1) {
+        echo '[batch.php] CSV列を自動検出できませんでした。URL/IDが含まれる列番号(0始まり)を探します。' . PHP_EOL;
+        // youtube.com を含む列を探す
+        if (isset($lines[1])) {
+            $row = str_getcsv($lines[1]);
+            foreach ($row as $i => $val) {
+                if (str_contains($val, 'youtube.com') || preg_match('/^[A-Za-z0-9_-]{11}$/', $val)) {
+                    $colIndex = $i;
+                    echo '[batch.php] 列 ' . $colIndex . ' を使用: ' . ($header[$colIndex] ?? '') . PHP_EOL;
+                    break;
+                }
+            }
+        }
+    }
+
+    if ($colIndex === -1) {
+        echo '[ERROR] CSVからビデオID/URLの列を特定できませんでした。' . PHP_EOL;
+        exit(1);
+    }
+
+    $ids = [];
+    foreach (array_slice($lines, 1) as $line) {
+        if (trim($line) === '') continue;
+        $row = str_getcsv($line);
+        $val = trim($row[$colIndex] ?? '');
+        $id  = extractVideoId($val);
+        if ($id) {
+            $ids[] = $id;
+        }
+    }
+    return array_values(array_unique($ids));
+}
+
+/**
+ * YouTube URLまたはビデオIDからビデオIDを抽出する。
+ */
+function extractVideoId(string $input): ?string
+{
+    // 既にビデオID形式（11文字の英数字とハイフン・アンダーバー）
+    if (preg_match('/^[A-Za-z0-9_-]{11}$/', $input)) {
+        return $input;
+    }
+    // YouTube URL から抽出
+    if (preg_match('/(?:youtube\.com\/watch\?.*v=|youtu\.be\/)([A-Za-z0-9_-]{11})/', $input, $m)) {
+        return $m[1];
+    }
+    return null;
+}
+
+/**
+ * videos.json に保存する。
+ */
+function saveVideos(array $videos): void
+{
+    $dataDir = dirname(DATA_FILE);
+    if (!is_dir($dataDir)) {
+        mkdir($dataDir, 0755, true);
+    }
+    $json = json_encode($videos, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    if (file_put_contents(DATA_FILE, $json) === false) {
+        echo '[ERROR] videos.json への書き込みに失敗しました。' . PHP_EOL;
+        exit(1);
+    }
+    echo '[batch.php] videos.json を更新しました。合計動画数: ' . count($videos) . PHP_EOL;
+    echo '[batch.php] 完了: ' . date('Y-m-d H:i:s') . PHP_EOL;
 }
 
 /**
